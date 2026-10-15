@@ -22,6 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          trap 'echo "FALHOU no passo de cabecalhos, linha $LINENO" | tee -a "$GITHUB_STEP_SUMMARY"' ERR
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | sort -V | tail -1)"
@@ -37,12 +38,17 @@ jobs:
           git clone --depth 1 --branch release-3.4.18 https://github.com/libsdl-org/SDL.git /tmp/sdl
           cp -r /tmp/sdl/include/SDL3 "$INC/"
 
-          cp -r /usr/include/libavcodec /usr/include/libavformat /usr/include/libavutil /usr/include/libswscale "$INC/"
+          for L in libavcodec libavformat libavutil libswscale; do
+            D="$(find /usr/include -maxdepth 3 -type d -name "$L" -print -quit)"
+            echo "$L em: $D"
+            test -n "$D" || { echo "ERRO: cabecalhos de $L nao encontrados"; exit 1; }
+            cp -r "$D" "$INC/"
+          done
           find /usr/include -name avconfig.h -path '*libavutil*' -exec cp {} "$INC/libavutil/" \;
 
-          dpkg -L libvulkan-memory-allocator-dev > /tmp/vma_files.txt
-          VMA="$(grep -m1 'vk_mem_alloc\.h$' /tmp/vma_files.txt)"
+          VMA="$(find /usr/include -name vk_mem_alloc.h -print -quit)"
           echo "VMA=$VMA"
+          test -n "$VMA" || { echo "ERRO: vk_mem_alloc.h nao encontrado"; exit 1; }
           cp "$VMA" "$INC/vk_mem_alloc.h"
 
           mkdir -p "$INC/shaderc"
