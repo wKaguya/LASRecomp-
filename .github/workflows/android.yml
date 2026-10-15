@@ -1,4 +1,4 @@
-name: Android NDK - verificacao de compilacao
+name: Android NDK - dependencias, compilacao e link
 
 on:
   workflow_dispatch:
@@ -6,90 +6,156 @@ on:
     branches: [main]
 
 jobs:
-  compile-check:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - name: Baixar o codigo
         uses: actions/checkout@v4
 
-      - name: Instalar cabecalhos (FFmpeg e VMA)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libvulkan-memory-allocator-dev
-
-      - name: Montar pasta de cabecalhos (SDL3, FFmpeg, VMA, shaderc)
+      - name: Localizar o NDK
         shell: bash
         run: |
           set -euo pipefail
-          trap 'echo "FALHOU no passo de cabecalhos, linha $LINENO" | tee -a "$GITHUB_STEP_SUMMARY"' ERR
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | sort -V | tail -1)"
           fi
           echo "NDK=$NDK"
           echo "NDK=$NDK" >> "$GITHUB_ENV"
-          SYSINC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
-          test -f "$SYSINC/vulkan/vulkan.h" || { echo "ERRO: vulkan.h nao encontrado no NDK"; exit 1; }
+          echo "TOOLBIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_ENV"
+          echo "P=$GITHUB_WORKSPACE/deps-android" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
 
-          INC="$PWD/deps/include"
-          mkdir -p "$INC"
+      - name: Restaurar cache das dependencias
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps-android
+          key: android-deps-v1
 
-          git clone --depth 1 --branch release-3.4.18 https://github.com/libsdl-org/SDL.git /tmp/sdl
-          cp -r /tmp/sdl/include/SDL3 "$INC/"
+      - name: Compilar dependencias (SDL3, FFmpeg, Vulkan, VMA, shaderc)
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          W=/tmp/depsbuild; S=/tmp/depssrc; LOGS="$PWD/deps-logs"
+          mkdir -p "$P/include" "$P/lib" "$W" "$S" "$LOGS"
+          JOBS=$(nproc)
 
-          for L in libavcodec libavformat libavutil libswscale; do
-            D="$(find /usr/include -maxdepth 3 -type d -name "$L" -print -quit)"
-            echo "$L em: $D"
-            test -n "$D" || { echo "ERRO: cabecalhos de $L nao encontrados"; exit 1; }
-            cp -r "$D" "$INC/"
-          done
-          find /usr/include -name avconfig.h -path '*libavutil*' -exec cp {} "$INC/libavutil/" \;
+          on_err() {
+            {
+              echo "## FALHA nas dependencias (linha $1)"
+              echo '```'
+              L="$(ls -t "$LOGS"/*.log 2>/dev/null | head -n 1 || true)"
+              if [ -n "$L" ]; then echo "$L"; tail -n 40 "$L"; fi
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          trap 'on_err $LINENO' ERR
 
-          VMA="$(find /usr/include -name vk_mem_alloc.h -print -quit)"
-          echo "VMA=$VMA"
-          test -n "$VMA" || { echo "ERRO: vk_mem_alloc.h nao encontrado"; exit 1; }
-          cp "$VMA" "$INC/vk_mem_alloc.h"
+          fetch() { curl -fsSL -o "$S/$3" "$1"; echo "$2  $S/$3" | sha256sum -c --quiet; }
+          unpack() { rm -rf "$W/$2"; mkdir -p "$W/$2"; tar -xf "$S/$1" -C "$W/$2" --strip-components 1; }
 
-          mkdir -p "$INC/shaderc"
-          SC="$(find "$NDK" -path '*shaderc/shaderc.h' 2>/dev/null | head -1 || true)"
-          if [ -n "$SC" ]; then
-            echo "shaderc do NDK: $SC"
-            cp "$(dirname "$SC")"/*.h "$INC/shaderc/"
-          else
-            echo "shaderc nao esta no NDK; usando os cabecalhos do GitHub"
-            git clone --depth 1 https://github.com/google/shaderc.git /tmp/shaderc
-            cp /tmp/shaderc/libshaderc/include/shaderc/*.h "$INC/shaderc/"
-          fi
-          ls "$INC"
+          echo ">>> baixando fontes"
+          fetch https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz \
+                7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68 SDL3-3.4.16.tar.gz
+          fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+                8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
+          fetch https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz \
+                6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83 Vulkan-Headers-1.4.350.1.tar.gz
+          fetch https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.3.0.tar.gz \
+                c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e VulkanMemoryAllocator-3.3.0.tar.gz
 
-      - name: Compilar o runtime para Android arm64 (API 33)
+          echo ">>> cabecalhos Vulkan e VMA"
+          unpack Vulkan-Headers-1.4.350.1.tar.gz vulkan-headers
+          cp -R "$W/vulkan-headers/include/vulkan" "$W/vulkan-headers/include/vk_video" "$P/include/"
+          unpack VulkanMemoryAllocator-3.3.0.tar.gz vma
+          mkdir -p "$P/include/vma"
+          cp "$W/vma/include/vk_mem_alloc.h" "$P/include/vma/"
+
+          echo ">>> SDL3"
+          unpack SDL3-3.4.16.tar.gz sdl
+          cmake -S "$W/sdl" -B "$W/sdl/build" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_ANDROID_JAR=OFF \
+            > "$LOGS/sdl-configure.log" 2>&1
+          cmake --build "$W/sdl/build" -j"$JOBS" > "$LOGS/sdl-build.log" 2>&1
+          cmake --install "$W/sdl/build" > "$LOGS/sdl-install.log" 2>&1
+          test -f "$P/lib/libSDL3.so"
+
+          echo ">>> FFmpeg"
+          unpack ffmpeg-9.0.2.tar.xz ffmpeg
+          (
+            cd "$W/ffmpeg"
+            ./configure --prefix="$P" --enable-cross-compile --target-os=android --arch=aarch64 \
+              --cc="$TOOLBIN/aarch64-linux-android33-clang" --cxx="$TOOLBIN/aarch64-linux-android33-clang++" \
+              --ar="$TOOLBIN/llvm-ar" --nm="$TOOLBIN/llvm-nm" --ranlib="$TOOLBIN/llvm-ranlib" --strip="$TOOLBIN/llvm-strip" \
+              --enable-shared --disable-static --enable-pic \
+              --disable-autodetect --disable-programs --disable-doc --disable-network --disable-avdevice --disable-avfilter \
+              --disable-swresample --disable-everything \
+              --enable-protocol=file --enable-demuxer=matroska,mov \
+              --enable-decoder=vp9,vp8,vorbis,opus,h264,aac --enable-parser=vp9,vp8,vorbis,opus,h264,aac \
+              > "$LOGS/ffmpeg-configure.log" 2>&1
+            make -j"$JOBS" > "$LOGS/ffmpeg-build.log" 2>&1
+            make install > "$LOGS/ffmpeg-install.log" 2>&1
+          )
+          if grep -q 'define CONFIG_GPL 1' "$W/ffmpeg/config.h"; then echo "FFmpeg nao e LGPL"; false; fi
+          test -f "$P/lib/libavcodec.so"
+
+          echo ">>> shaderc (do proprio NDK)"
+          ls "$NDK/sources/third_party" || true
+          SCH="$(find "$NDK/sources/third_party/shaderc" -path '*include/shaderc/shaderc.h' -print -quit)"
+          SCA="$(find "$NDK/sources/third_party/shaderc" -path '*c++_static*arm64-v8a*' -name libshaderc.a -print -quit)"
+          echo "header: $SCH"; echo "lib: $SCA"
+          test -n "$SCH"; test -n "$SCA"
+          mkdir -p "$P/include/shaderc"
+          cp "$(dirname "$SCH")"/*.h "$P/include/shaderc/"
+          cp "$SCA" "$P/lib/libshaderc.a"
+
+          echo "$(date -u)" > "$P/done.txt"
+          ls "$P/lib"
+
+      - name: Salvar cache das dependencias
+        if: steps.cache.outputs.cache-hit != 'true' && hashFiles('deps-android/done.txt') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: deps-android
+          key: android-deps-v1
+
+      - name: Compilar e linkar o lasrecomp (Android arm64, API 33)
         shell: bash
         run: |
           set +e
-          TOOLBIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           "$TOOLBIN/aarch64-linux-android33-clang" --version
-          make -k -j4 ARCH=aarch64 \
+          make -Otarget -k -j4 ARCH=aarch64 \
             CC="$TOOLBIN/aarch64-linux-android33-clang" \
             CXX="$TOOLBIN/aarch64-linux-android33-clang++" \
-            DEPINC="-I$PWD/deps/include" \
-            runtime-objs 2>&1 | tee build.log
+            DEPINC="-I$P/include" \
+            LDFLAGS="-fuse-ld=lld -rdynamic -L$P/lib -Wl,-rpath-link,$P/lib -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan -lshaderc -ldl -lm -llog" \
+            build/aarch64/lasrecomp 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           {
-            echo "## Resultado da compilacao do runtime (Android arm64, API 33)"
+            echo "## Resultado: compilacao e link do lasrecomp (Android arm64, API 33)"
             echo "Codigo de saida do make: $rc"
+            if [ -f build/aarch64/lasrecomp ]; then echo "Binario gerado: SIM"; else echo "Binario gerado: NAO"; fi
             echo
             echo "### Erros unicos"
             echo '```'
-            grep -E 'error:|fatal error:|undefined' build.log | sed -E 's#^[^ ]*/runtime/#runtime/#' | sort -u | head -80
+            grep -E 'error:|fatal error:|undefined symbol|undefined reference' build.log | sed -E 's#^[^ ]*/runtime/#runtime/#' | sort -u | head -80
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      - name: Guardar o log completo
+      - name: Guardar logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-compile-log
-          path: build.log
+          name: android-logs
+          path: |
+            build.log
+            deps-logs
           if-no-files-found: ignore
