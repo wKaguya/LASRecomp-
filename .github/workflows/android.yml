@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Baixar o codigo
         uses: actions/checkout@v4
@@ -29,14 +29,13 @@ jobs:
           sudo apt-get install -y ninja-build
 
       - name: Restaurar cache das dependencias
-        id: cache
         uses: actions/cache/restore@v4
         with:
           path: deps-android
-          key: android-deps-v1
+          key: android-deps-v2-${{ github.run_id }}
+          restore-keys: android-deps-v2-
 
       - name: Compilar dependencias (SDL3, FFmpeg, Vulkan, VMA, shaderc)
-        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -47,84 +46,101 @@ jobs:
           on_err() {
             {
               echo "## FALHA nas dependencias (linha $1)"
+              echo "Comando: $2"
               echo '```'
+              ls -la "$P/lib" 2>/dev/null || true
               L="$(ls -t "$LOGS"/*.log 2>/dev/null | head -n 1 || true)"
-              if [ -n "$L" ]; then echo "$L"; tail -n 40 "$L"; fi
+              if [ -n "$L" ]; then echo "--- $L"; tail -n 40 "$L"; fi
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           }
-          trap 'on_err $LINENO' ERR
+          trap 'on_err $LINENO "$BASH_COMMAND"' ERR
 
           fetch() { curl -fsSL -o "$S/$3" "$1"; echo "$2  $S/$3" | sha256sum -c --quiet; }
           unpack() { rm -rf "$W/$2"; mkdir -p "$W/$2"; tar -xf "$S/$1" -C "$W/$2" --strip-components 1; }
 
-          echo ">>> baixando fontes"
-          fetch https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz \
-                7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68 SDL3-3.4.16.tar.gz
-          fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
-                8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
-          fetch https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz \
-                6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83 Vulkan-Headers-1.4.350.1.tar.gz
-          fetch https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.3.0.tar.gz \
-                c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e VulkanMemoryAllocator-3.3.0.tar.gz
+          if [ ! -f "$P/include/vma/vk_mem_alloc.h" ]; then
+            echo ">>> cabecalhos Vulkan e VMA"
+            fetch https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.1.tar.gz \
+                  6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83 Vulkan-Headers-1.4.350.1.tar.gz
+            fetch https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.3.0.tar.gz \
+                  c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e VulkanMemoryAllocator-3.3.0.tar.gz
+            unpack Vulkan-Headers-1.4.350.1.tar.gz vulkan-headers
+            cp -R "$W/vulkan-headers/include/vulkan" "$W/vulkan-headers/include/vk_video" "$P/include/"
+            unpack VulkanMemoryAllocator-3.3.0.tar.gz vma
+            mkdir -p "$P/include/vma"
+            cp "$W/vma/include/vk_mem_alloc.h" "$P/include/vma/"
+          fi
 
-          echo ">>> cabecalhos Vulkan e VMA"
-          unpack Vulkan-Headers-1.4.350.1.tar.gz vulkan-headers
-          cp -R "$W/vulkan-headers/include/vulkan" "$W/vulkan-headers/include/vk_video" "$P/include/"
-          unpack VulkanMemoryAllocator-3.3.0.tar.gz vma
-          mkdir -p "$P/include/vma"
-          cp "$W/vma/include/vk_mem_alloc.h" "$P/include/vma/"
+          if [ ! -f "$P/lib/libSDL3.so" ]; then
+            echo ">>> SDL3"
+            fetch https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz \
+                  7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68 SDL3-3.4.16.tar.gz
+            unpack SDL3-3.4.16.tar.gz sdl
+            cmake -S "$W/sdl" -B "$W/sdl/build" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib \
+              -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_ANDROID_JAR=OFF \
+              > "$LOGS/sdl-configure.log" 2>&1
+            cmake --build "$W/sdl/build" -j"$JOBS" > "$LOGS/sdl-build.log" 2>&1
+            cmake --install "$W/sdl/build" > "$LOGS/sdl-install.log" 2>&1
+            test -f "$P/lib/libSDL3.so"
+          fi
 
-          echo ">>> SDL3"
-          unpack SDL3-3.4.16.tar.gz sdl
-          cmake -S "$W/sdl" -B "$W/sdl/build" -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib \
-            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_ANDROID_JAR=OFF \
-            > "$LOGS/sdl-configure.log" 2>&1
-          cmake --build "$W/sdl/build" -j"$JOBS" > "$LOGS/sdl-build.log" 2>&1
-          cmake --install "$W/sdl/build" > "$LOGS/sdl-install.log" 2>&1
-          test -f "$P/lib/libSDL3.so"
+          if [ ! -f "$P/lib/libavcodec.so" ]; then
+            echo ">>> FFmpeg"
+            fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+                  8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
+            unpack ffmpeg-9.0.2.tar.xz ffmpeg
+            (
+              cd "$W/ffmpeg"
+              ./configure --prefix="$P" --enable-cross-compile --target-os=android --arch=aarch64 \
+                --cc="$TOOLBIN/aarch64-linux-android33-clang" --cxx="$TOOLBIN/aarch64-linux-android33-clang++" \
+                --ar="$TOOLBIN/llvm-ar" --nm="$TOOLBIN/llvm-nm" --ranlib="$TOOLBIN/llvm-ranlib" --strip="$TOOLBIN/llvm-strip" \
+                --enable-shared --disable-static --enable-pic \
+                --disable-autodetect --disable-programs --disable-doc --disable-network --disable-avdevice --disable-avfilter \
+                --disable-swresample --disable-everything \
+                --enable-protocol=file --enable-demuxer=matroska,mov \
+                --enable-decoder=vp9,vp8,vorbis,opus,h264,aac --enable-parser=vp9,vp8,vorbis,opus,h264,aac \
+                > "$LOGS/ffmpeg-configure.log" 2>&1
+              make -j"$JOBS" > "$LOGS/ffmpeg-build.log" 2>&1
+              make install > "$LOGS/ffmpeg-install.log" 2>&1
+            )
+            if grep -q 'define CONFIG_GPL 1' "$W/ffmpeg/config.h"; then echo "FFmpeg nao e LGPL"; false; fi
+            ls -la "$P/lib" > "$LOGS/ffmpeg-libs.log"
+            test -f "$P/lib/libavcodec.so"
+          fi
 
-          echo ">>> FFmpeg"
-          unpack ffmpeg-9.0.2.tar.xz ffmpeg
-          (
-            cd "$W/ffmpeg"
-            ./configure --prefix="$P" --enable-cross-compile --target-os=android --arch=aarch64 \
-              --cc="$TOOLBIN/aarch64-linux-android33-clang" --cxx="$TOOLBIN/aarch64-linux-android33-clang++" \
-              --ar="$TOOLBIN/llvm-ar" --nm="$TOOLBIN/llvm-nm" --ranlib="$TOOLBIN/llvm-ranlib" --strip="$TOOLBIN/llvm-strip" \
-              --enable-shared --disable-static --enable-pic \
-              --disable-autodetect --disable-programs --disable-doc --disable-network --disable-avdevice --disable-avfilter \
-              --disable-swresample --disable-everything \
-              --enable-protocol=file --enable-demuxer=matroska,mov \
-              --enable-decoder=vp9,vp8,vorbis,opus,h264,aac --enable-parser=vp9,vp8,vorbis,opus,h264,aac \
-              > "$LOGS/ffmpeg-configure.log" 2>&1
-            make -j"$JOBS" > "$LOGS/ffmpeg-build.log" 2>&1
-            make install > "$LOGS/ffmpeg-install.log" 2>&1
-          )
-          if grep -q 'define CONFIG_GPL 1' "$W/ffmpeg/config.h"; then echo "FFmpeg nao e LGPL"; false; fi
-          test -f "$P/lib/libavcodec.so"
+          if [ ! -f "$P/lib/libshaderc_shared.so" ]; then
+            echo ">>> shaderc (compilado do codigo-fonte)"
+            fetch https://github.com/google/shaderc/archive/refs/tags/v2026.3.tar.gz \
+                  ee493ccf1b3038b4ef2fe024664c5eb2dc4bcc1f6b05b33e3909de0e19c81024 shaderc-2026.3.tar.gz
+            unpack shaderc-2026.3.tar.gz shaderc
+            (cd "$W/shaderc" && python3 utils/git-sync-deps > "$LOGS/shaderc-sync.log" 2>&1)
+            cmake -S "$W/shaderc" -B "$W/shaderc/build" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-33 -DANDROID_STL=c++_static \
+              -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON \
+              -DSHADERC_SKIP_COPYRIGHT_CHECK=ON -DSPIRV_SKIP_TESTS=ON -DSPIRV_SKIP_EXECUTABLES=ON \
+              -DENABLE_GLSLANG_BINARIES=OFF -DSPIRV_TOOLS_BUILD_STATIC=ON -DBUILD_SHARED_LIBS=OFF \
+              > "$LOGS/shaderc-configure.log" 2>&1
+            cmake --build "$W/shaderc/build" --target shaderc_shared -j"$JOBS" > "$LOGS/shaderc-build.log" 2>&1
+            mkdir -p "$P/include/shaderc"
+            cp "$W/shaderc/libshaderc/include/shaderc/"*.h "$P/include/shaderc/"
+            cp -P "$W/shaderc/build/libshaderc/libshaderc_shared.so"* "$P/lib/"
+            test -f "$P/lib/libshaderc_shared.so"
+          fi
 
-          echo ">>> shaderc (do proprio NDK)"
-          ls "$NDK/sources/third_party" || true
-          SCH="$(find "$NDK/sources/third_party/shaderc" -path '*include/shaderc/shaderc.h' -print -quit)"
-          SCA="$(find "$NDK/sources/third_party/shaderc" -path '*c++_static*arm64-v8a*' -name libshaderc.a -print -quit)"
-          echo "header: $SCH"; echo "lib: $SCA"
-          test -n "$SCH"; test -n "$SCA"
-          mkdir -p "$P/include/shaderc"
-          cp "$(dirname "$SCH")"/*.h "$P/include/shaderc/"
-          cp "$SCA" "$P/lib/libshaderc.a"
-
-          echo "$(date -u)" > "$P/done.txt"
+          echo "Dependencias prontas:"
           ls "$P/lib"
 
       - name: Salvar cache das dependencias
-        if: steps.cache.outputs.cache-hit != 'true' && hashFiles('deps-android/done.txt') != ''
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: deps-android
-          key: android-deps-v1
+          key: android-deps-v2-${{ github.run_id }}
 
       - name: Compilar e linkar o lasrecomp (Android arm64, API 33)
         shell: bash
@@ -135,7 +151,7 @@ jobs:
             CC="$TOOLBIN/aarch64-linux-android33-clang" \
             CXX="$TOOLBIN/aarch64-linux-android33-clang++" \
             DEPINC="-I$P/include" \
-            LDFLAGS="-fuse-ld=lld -rdynamic -L$P/lib -Wl,-rpath-link,$P/lib -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan -lshaderc -ldl -lm -llog" \
+            LDFLAGS="-fuse-ld=lld -rdynamic -L$P/lib -Wl,-rpath-link,$P/lib -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan -lshaderc_shared -ldl -lm -llog" \
             build/aarch64/lasrecomp 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
           {
