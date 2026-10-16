@@ -1,5 +1,8 @@
 // LAS Recomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <SDL3/SDL.h>
+#ifdef __ANDROID__
+#include <SDL3/SDL_main.h>  // Android: main() becomes SDL_main(), which SDL's Java side calls from libmain.so
+#endif
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
