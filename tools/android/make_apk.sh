@@ -3,14 +3,14 @@
 # Monta o APK de teste do LAS Recomp para Android (arm64-v8a): o projeto Gradle do SDL3 (classes Java SDLActivity),
 # a libmain.so do jogo e as bibliotecas de que ela depende (SDL3, FFmpeg, shaderc, libc++_shared).
 # Variaveis exigidas (o workflow define): P (pasta das dependencias, com lib/), NDK, TOOLBIN (bin do NDK).
-# Opcional: ANDROID_HOME (SDK do Android), GRADLE_CMD (padrao: "sh ./gradlew").
+# Opcional: ANDROID_HOME (SDK do Android), GRADLE_CMD (padrao: "bash ./gradlew").
 set -euo pipefail
 
 LIBMAIN="$(realpath "${1:?uso: make_apk.sh <libmain.so> <saida.apk>}")"
 OUT="$(realpath -m "${2:?uso: make_apk.sh <libmain.so> <saida.apk>}")"
 : "${P:?variavel P (dependencias) nao definida}" "${NDK:?variavel NDK nao definida}" "${TOOLBIN:?variavel TOOLBIN nao definida}"
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-GRADLE_CMD="${GRADLE_CMD:-sh ./gradlew}"
+GRADLE_CMD="${GRADLE_CMD:-bash ./gradlew}"
 PKG=com.lasrecomp.android
 
 test -f "$LIBMAIN" || { echo "ERRO: $LIBMAIN nao existe"; exit 1; }
