@@ -179,6 +179,45 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+      - name: Montar o APK (Gradle)
+        shell: bash
+        run: |
+          set +e
+          APK=apk-out/LASRecomp-debug.apk
+          bash tools/android/make_apk.sh apk-libs/arm64-v8a/libmain.so "$APK" 2>&1 | tee apk-build.log
+          rc=${PIPESTATUS[0]}
+          {
+            echo "## Resultado: APK (Android arm64, API 33+)"
+            echo "Codigo de saida: $rc"
+            if [ -f "$APK" ]; then
+              echo "APK gerado: SIM"
+              ls -l "$APK"
+              echo "Bibliotecas dentro do APK:"
+              unzip -l "$APK" | grep 'lib/arm64-v8a' | awk '{print $1, $4}'
+            else
+              echo "APK gerado: NAO"
+            fi
+            echo
+            echo "### Dependencias fora do APK"
+            echo '```'
+            sed -n '/Dependencias fora do APK/,/compilando o APK/p' apk-build.log | grep -v '^>>>'
+            echo '```'
+            if [ "$rc" != "0" ]; then
+              echo "### Ultimas linhas do log"
+              echo '```'
+              tail -n 50 apk-build.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Publicar o APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LASRecomp-debug-apk
+          path: apk-out/LASRecomp-debug.apk
+          if-no-files-found: error
+
       - name: Guardar logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -188,4 +227,6 @@ jobs:
             build.log
             deps-logs
             apk-libs
+            apk-build.log
+            apk-out/gradle.log
           if-no-files-found: ignore
