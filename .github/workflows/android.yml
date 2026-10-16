@@ -142,26 +142,39 @@ jobs:
           path: deps-android
           key: android-deps-v2-${{ github.run_id }}
 
-      - name: Compilar e linkar o lasrecomp (Android arm64, API 33)
+      - name: Compilar e linkar libmain.so (Android arm64, API 33)
         shell: bash
         run: |
           set +e
           "$TOOLBIN/aarch64-linux-android33-clang" --version
           make -Otarget -k -j4 ARCH=aarch64 \
-            CC="$TOOLBIN/aarch64-linux-android33-clang" \
-            CXX="$TOOLBIN/aarch64-linux-android33-clang++" \
+            CC="$TOOLBIN/aarch64-linux-android33-clang -fPIC" \
+            CXX="$TOOLBIN/aarch64-linux-android33-clang++ -fPIC" \
             DEPINC="-I$P/include" \
-            LDFLAGS="-fuse-ld=lld -rdynamic -L$P/lib -Wl,-rpath-link,$P/lib -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan -lshaderc_shared -ldl -lm -llog" \
+            LDFLAGS="-shared -Wl,-soname,libmain.so -Wl,--no-undefined -fuse-ld=lld -L$P/lib -Wl,-rpath-link,$P/lib -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan -lshaderc_shared -ldl -lm -llog" \
             build/aarch64/lasrecomp 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
+          LIB=apk-libs/arm64-v8a/libmain.so
+          if [ "$rc" = "0" ] && [ -f build/aarch64/lasrecomp ]; then
+            mkdir -p apk-libs/arm64-v8a
+            cp build/aarch64/lasrecomp "$LIB"
+          fi
           {
-            echo "## Resultado: compilacao e link do lasrecomp (Android arm64, API 33)"
+            echo "## Resultado: libmain.so (Android arm64, API 33)"
             echo "Codigo de saida do make: $rc"
-            if [ -f build/aarch64/lasrecomp ]; then echo "Binario gerado: SIM"; else echo "Binario gerado: NAO"; fi
+            if [ -f "$LIB" ]; then
+              echo "libmain.so gerado: SIM"
+              ls -l "$LIB"
+              echo "SDL_main exportado (1 = sim): $("$TOOLBIN/llvm-nm" -D --defined-only "$LIB" | grep -c ' T SDL_main$')"
+              echo "Bibliotecas necessarias:"
+              "$TOOLBIN/llvm-readelf" -d "$LIB" | grep NEEDED
+            else
+              echo "libmain.so gerado: NAO"
+            fi
             echo
             echo "### Erros unicos"
             echo '```'
-            grep -E 'error:|fatal error:|undefined symbol|undefined reference' build.log | sed -E 's#^[^ ]*/runtime/#runtime/#' | sort -u | head -80
+            grep -E 'error:|fatal error:|undefined symbol|undefined reference|relocation' build.log | sed -E 's#^[^ ]*/runtime/#runtime/#' | sort -u | head -80
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -174,4 +187,5 @@ jobs:
           path: |
             build.log
             deps-logs
+            apk-libs
           if-no-files-found: ignore
