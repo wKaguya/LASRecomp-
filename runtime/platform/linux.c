@@ -1,4 +1,4 @@
-// Linux host layer (runtime/platform.h). x86-64 and aarch64.
+// Linux host layer (runtime/platform.h). x86-64 and aarch64; also used for Android (arm64-v8a, built with the NDK).
 #define _GNU_SOURCE
 #include <SDL3/SDL.h>
 #include <dlfcn.h>
@@ -80,7 +80,48 @@ void plat_thread_realtime(uint64_t period_ns) {
 // start screen re-executing itself for the game) append to the same log.
 static char g_log_path[1024];
 
+#ifdef __ANDROID__
+// Android: the data folder is the app's own folder on shared storage, which the phone's file manager can open:
+//   /sdcard/Android/data/com.lasrecomp.android/files/lasrecomp
+// (the game dump and prod.keys go there). Everything the program prints (init log, shader errors, VkResult codes,
+// crash reports) goes to las_android_log.txt in that folder; the previous run's log is kept as
+// las_android_log_prev.txt. rt_paths_init (runtime/paths.c) picks the folder up from LARECOMP_DATA_ROOT.
+#define ANDROID_DEFAULT_FILES_DIR "/sdcard/Android/data/com.lasrecomp.android/files"
+
+static void make_dirs(char *dir) {
+    for (char *c = dir + 1; *c; c++)
+        if (*c == '/') { *c = 0; mkdir(dir, 0775); *c = '/'; }
+    mkdir(dir, 0775);
+}
+
+static void android_log_to_file(void) {
+    char dir[900], path[1024], prev[1024];
+    const char *base = SDL_GetAndroidExternalStoragePath();
+    if (!base || !*base) base = ANDROID_DEFAULT_FILES_DIR;
+    snprintf(dir, sizeof dir, "%s/lasrecomp", base);
+    make_dirs(dir);
+    setenv("LARECOMP_DATA_ROOT", dir, 1);
+    snprintf(path, sizeof path, "%s/las_android_log.txt", dir);
+    snprintf(prev, sizeof prev, "%s/las_android_log_prev.txt", dir);
+    rename(path, prev);
+    if (!freopen(path, "w", stderr)) return;  // (no log possible: carry on, the screen still works)
+    snprintf(g_log_path, sizeof g_log_path, "%s", path);
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+    setvbuf(stderr, NULL, _IONBF, 0);  // (a crash must not lose the last lines)
+    setvbuf(stdout, NULL, _IONBF, 0);
+    time_t now = time(NULL);
+    fprintf(stderr, "[android] LAS Recomp log, started at unix time %lld\n", (long long)now);
+    fprintf(stderr, "[android] data folder: %s\n", dir);
+    fprintf(stderr, "[android] log file: %s\n", path);
+    fprintf(stderr, "[android] SDL storage path: %s\n", SDL_GetAndroidExternalStoragePath() ? SDL_GetAndroidExternalStoragePath() : "(null)");
+}
+#endif
+
 static void log_to_file_without_terminal(void) {
+#ifdef __ANDROID__
+    android_log_to_file();
+    return;
+#endif
     if (isatty(STDERR_FILENO)) return;
     char dir[900];
     const char *env = getenv("LARECOMP_DATA_ROOT"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
@@ -143,6 +184,13 @@ static char **self_argv(void) {
 }
 
 void plat_exec(char *const argv[]) {
+#ifdef __ANDROID__
+    // The process is the app (started by Zygote, not by a shell): executing /proc/self/exe would start app_process
+    // without the app. No re-exec here; the caller reports the failure and stops.
+    (void)argv;
+    errno = ENOSYS;
+    return;
+#endif
     if (argv) { execv(argv[0], argv); return; }
     char path[4096];
     char **av = self_argv();
